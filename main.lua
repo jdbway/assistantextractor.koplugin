@@ -1,14 +1,15 @@
 -- Assistant Extractor plugin entry point.
 --
--- Second Extractor built against the design proposed in
--- AnnotationSync.koplugin#93 (the first is vocabdeckextractor.koplugin).
--- Reads assistant.koplugin's notebook markdown files directly -- see
--- extractor_assistant.lua and ARCHITECTURE.md for how and why.
+-- Second Extractor built against AnnotationSync's Extractor interface (see
+-- AnnotationSync.koplugin#93 and its docs/writing-an-extractor.md; the first
+-- is vocabdeckextractor.koplugin). Reads assistant.koplugin's notebook
+-- markdown files directly -- see extractor_assistant.lua and ARCHITECTURE.md
+-- for how and why.
 --
--- Status: extraction is real and testable today. The push-to-AnnotationSync
--- half is a stub for the same reason as the VocabDeck extractor: that
--- interface doesn't exist in AnnotationSync's code yet. See
--- onPushToAnnotationSync() below.
+-- Status: extraction, the sync-event hook, and the real pushExtractorData
+-- call are all live. writeback_fn (appending merged-in entries this device
+-- hasn't seen yet -- the only way a note written on another device shows up
+-- here) is still a stub -- see stubWriteback() below.
 local _ = require("gettext")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local InfoMessage = require("ui/widget/infomessage")
@@ -16,7 +17,9 @@ local UIManager = require("ui/uimanager")
 local DataStorage = require("datastorage")
 local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
+local logger = require("logger")
 local dump = require("dump")
+local PluginShare = require("pluginshare")
 
 local Extractor = require("extractor_assistant")
 
@@ -109,12 +112,60 @@ function AssistantExtractor:dumpExtractionToFile()
     })
 end
 
--- See the header comment -- deferred until AnnotationSync's side of the
--- interface exists.
+-- Not built yet -- next task. pushExtractorData always calls this, whether
+-- or not anything changed, so it's safe to call unconditionally; it just
+-- doesn't persist anything into the notebook file yet. The real version
+-- needs to: for any entry in merged_records not already in this file (by
+-- merge_key), append it -- that's the only way a note written on another
+-- device shows up here. Every field is write_once, so there's no per-field
+-- merging to do on entries this device already has.
+local function stubWriteback(filename, merged_records)
+    logger.info("assistantextractor: writeback stub for", filename,
+        "-- got", #merged_records, "merged record(s), not yet persisted")
+end
+
+-- One pushExtractorData call per notebook file, matching this Extractor's
+-- <extractor_id>/<filename> namespacing.
+function AssistantExtractor:pushFile(path)
+    local records, err = Extractor.extractFile(path)
+    local filename = path:match("([^/\\]+)$") or path
+    if err then
+        logger.warn("assistantextractor: extraction failed for", filename, "--", err)
+        return
+    end
+    PluginShare.AnnotationSync.pushExtractorData("assistant", filename, records, function(merged_records)
+        stubWriteback(filename, merged_records)
+    end)
+end
+
+function AssistantExtractor:pushAll()
+    for _, path in ipairs(Extractor.listNotebookFiles()) do
+        self:pushFile(path)
+    end
+end
+
+-- AnnotationSyncRequested fires once per sync episode (manual "Sync Now" or
+-- a background reconnect), not per document -- correct here, since notebook
+-- entries aren't scoped to any one open book at sync time.
+function AssistantExtractor:onAnnotationSyncRequested()
+    if not PluginShare.AnnotationSync then return end
+    self:pushAll()
+end
+
+-- Manual trigger, kept alongside the automatic event hook above -- useful
+-- for testing without waiting for a real sync episode.
 function AssistantExtractor:onPushToAnnotationSync()
+    if not PluginShare.AnnotationSync then
+        UIManager:show(InfoMessage:new{
+            text = _("AnnotationSync isn't installed or enabled."),
+            timeout = 4,
+        })
+        return
+    end
+    self:pushAll()
     UIManager:show(InfoMessage:new{
-        text = _("Not implemented yet: AnnotationSync doesn't have a pushExtractorData interface to call. See AnnotationSync.koplugin issue #93."),
-        timeout = 5,
+        text = _("Push started. writeback isn't implemented yet, so nothing will be written back locally -- check the log for what came back."),
+        timeout = 6,
     })
 end
 
