@@ -119,15 +119,60 @@ end
 -- merge_key), append it -- that's the only way a note written on another
 -- device shows up here. Every field is write_once, so there's no per-field
 -- merging to do on entries this device already has.
+-- ============================================================
+-- TEMPORARY TEST HARNESS -- remove once end-to-end AnnotationSync testing is
+-- done. Shares the trigger file with vocabdeckextractor.koplugin's matching
+-- harness (one restart drives both), but writes its own status file to
+-- avoid interleaved writes between the two plugins. See that plugin's
+-- main.lua for the fuller explanation.
+-- ============================================================
+local AUTOTEST_TRIGGER = "/mnt/us/autotest_trigger.txt"
+local AUTOTEST_STATUS = "/mnt/us/as_autotest_status.txt"
+local autotest_enabled = false
+
+local function autotestLog(line)
+    if not autotest_enabled then return end
+    local f = io.open(AUTOTEST_STATUS, "a")
+    if f then
+        f:write(line .. ":" .. os.time() .. "\n")
+        f:close()
+    end
+end
+
+function AssistantExtractor:runAutotestIfTriggered()
+    if lfs.attributes(AUTOTEST_TRIGGER, "mode") ~= "file" then return end
+    autotest_enabled = true
+    autotestLog("init_reached")
+    UIManager:scheduleIn(5, function()
+        autotestLog("push_firing")
+        local ok, err = pcall(function() self:pushAll() end)
+        autotestLog(ok and "push_call_returned" or ("push_call_error:" .. tostring(err)))
+    end)
+end
+-- ============================================================
+-- END TEMPORARY TEST HARNESS
+-- ============================================================
+
 local function stubWriteback(filename, merged_records)
     logger.info("assistantextractor: writeback stub for", filename,
         "-- got", #merged_records, "merged record(s), not yet persisted")
+    autotestLog("writeback_called:" .. filename .. ":" .. #merged_records)
 end
 
 -- One pushExtractorData call per notebook file, matching this Extractor's
 -- <extractor_id>/<filename> namespacing.
+--
+-- want_all=true is deliberate here, not extractFile's default (new-since-
+-- last-extraction). "Extracted locally" and "pushed to AnnotationSync" are
+-- two different facts, and conflating them is exactly what caused a real
+-- bug during testing: entries already seen by an earlier "Extract now"
+-- debug run looked like nothing was left to push, even on their first-ever
+-- real sync. Every field here is write_once, so resending an entry
+-- AnnotationSync already has is a harmless no-op on the merge side --
+-- correctness costs nothing here, unlike bandwidth-sensitive cases where
+-- delta-only would matter more.
 function AssistantExtractor:pushFile(path)
-    local records, err = Extractor.extractFile(path)
+    local records, err = Extractor.extractFile(path, true)
     local filename = path:match("([^/\\]+)$") or path
     if err then
         logger.warn("assistantextractor: extraction failed for", filename, "--", err)
@@ -205,6 +250,7 @@ function AssistantExtractor:init()
     if self.ui and self.ui.menu and self.ui.menu.registerToMainMenu then
         self.ui.menu:registerToMainMenu(self)
     end
+    self:runAutotestIfTriggered()
 end
 
 return AssistantExtractor
