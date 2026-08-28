@@ -22,6 +22,13 @@ local PluginShare = require("pluginshare")
 local Extractor = require("extractor_assistant")
 local Writeback = require("writeback_assistant")
 
+-- Kept in sync with _meta.lua's version field by hand, not read from it --
+-- `_meta` is a generic filename every KOReader plugin ships, so
+-- `require("_meta")` is unsafe: Lua's module cache is keyed by the string
+-- passed to require(), and whichever plugin's _meta.lua is require()'d
+-- first under that name wins the cache slot for every other plugin too.
+local VERSION = "1.0.0"
+
 local AssistantExtractor = InputContainer:extend{
     name = "assistantextractor",
     is_doc_only = false,
@@ -241,7 +248,7 @@ function AssistantExtractor:addToMainMenu(menu_items)
 end
 
 function AssistantExtractor:init()
-    logger.info("assistantextractor: version", require("_meta").version)
+    logger.info("assistantextractor: version", VERSION)
     if self.ui and self.ui.menu and self.ui.menu.registerToMainMenu then
         self.ui.menu:registerToMainMenu(self)
     end
