@@ -6,10 +6,8 @@
 -- markdown files directly -- see extractor_assistant.lua and ARCHITECTURE.md
 -- for how and why.
 --
--- Status: extraction, the sync-event hook, and the real pushExtractorData
--- call are all live. writeback_fn (appending merged-in entries this device
--- hasn't seen yet -- the only way a note written on another device shows up
--- here) is still a stub -- see stubWriteback() below.
+-- Status: extraction, the sync-event hook, pushExtractorData, and writeback
+-- (see writeback_assistant.lua) are all live.
 local _ = require("gettext")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local InfoMessage = require("ui/widget/infomessage")
@@ -22,6 +20,7 @@ local dump = require("dump")
 local PluginShare = require("pluginshare")
 
 local Extractor = require("extractor_assistant")
+local Writeback = require("writeback_assistant")
 
 local AssistantExtractor = InputContainer:extend{
     name = "assistantextractor",
@@ -112,16 +111,9 @@ function AssistantExtractor:dumpExtractionToFile()
     })
 end
 
--- Not built yet -- next task. pushExtractorData always calls this, whether
--- or not anything changed, so it's safe to call unconditionally; it just
--- doesn't persist anything into the notebook file yet. The real version
--- needs to: for any entry in merged_records not already in this file (by
--- merge_key), append it -- that's the only way a note written on another
--- device shows up here. Every field is write_once, so there's no per-field
--- merging to do on entries this device already has.
 -- ============================================================
--- TEMPORARY TEST HARNESS -- remove once end-to-end AnnotationSync testing is
--- done. Shares the trigger file with vocabdeckextractor.koplugin's matching
+-- TEST HARNESS -- kept in place deliberately for reuse in future test runs.
+-- Shares the trigger file with vocabdeckextractor.koplugin's matching
 -- harness (one restart drives both), but writes its own status file to
 -- avoid interleaved writes between the two plugins. See that plugin's
 -- main.lua for the fuller explanation.
@@ -150,12 +142,14 @@ function AssistantExtractor:runAutotestIfTriggered()
     end)
 end
 -- ============================================================
--- END TEMPORARY TEST HARNESS
+-- END TEST HARNESS
 -- ============================================================
 
-local function stubWriteback(filename, merged_records)
-    logger.info("assistantextractor: writeback stub for", filename,
-        "-- got", #merged_records, "merged record(s), not yet persisted")
+local function applyWriteback(path, filename, merged_records)
+    local ok, err = pcall(Writeback.apply, path, merged_records)
+    if not ok then
+        logger.warn("assistantextractor: writeback failed for", filename, "--", tostring(err))
+    end
     autotestLog("writeback_called:" .. filename .. ":" .. #merged_records)
 end
 
@@ -179,7 +173,7 @@ function AssistantExtractor:pushFile(path)
         return
     end
     PluginShare.AnnotationSync.pushExtractorData("assistant", filename, records, function(merged_records)
-        stubWriteback(filename, merged_records)
+        applyWriteback(path, filename, merged_records)
     end)
 end
 
@@ -209,7 +203,7 @@ function AssistantExtractor:onPushToAnnotationSync()
     end
     self:pushAll()
     UIManager:show(InfoMessage:new{
-        text = _("Push started. writeback isn't implemented yet, so nothing will be written back locally -- check the log for what came back."),
+        text = _("Push started -- check the log for results."),
         timeout = 6,
     })
 end

@@ -16,8 +16,9 @@ plays for VocabDeck.
 
 | File | Responsibility |
 |---|---|
-| `main.lua` | Plugin entry point. Registers the debug menu (Tools > Assistant Extractor). Owns the (currently stubbed) call into AnnotationSync. |
+| `main.lua` | Plugin entry point. Registers the debug menu (Tools > Assistant Extractor). Owns the real push call into AnnotationSync and the sync-event hook. |
 | `extractor_assistant.lua` | The core pipeline: find notebook files (fixed locations + a cached filesystem walk), read only what's new since last time, return records. |
+| `writeback_assistant.lua` | The other half: appends any merged entry not already known locally (by Merge Key) onto the real notebook file, in the same format the app itself writes. Purely additive — nothing to update in place, since every field here is `write_once`. |
 | `notebook_parser.lua` | Splits one notebook file's raw markdown into individual entries. Pure function, no I/O. |
 | `extraction_state.lua` | Persists, per notebook file, the file size and set of entry keys already extracted, plus the cached result of the last filesystem walk. |
 | `fs_walk.lua` | Generic bounded recursive directory walk (find files matching a predicate, skip directories matching another). No notebook-specific knowledge — see its own header comment on why it's deliberately kept this narrow. |
@@ -79,6 +80,7 @@ picked up until one runs).
 - **Entry boundaries are detected by matching `# [` at the start of a line.** This is assistant.koplugin's own convention (`assistant_quicknote.lua` and `assistant_viewer.lua`'s `saveToNotebook` both write this exact heading shape) — if a future assistant.koplugin version changes it, this parser needs the matching change.
 - **Markdown inside a body is preserved verbatim, never stripped or restructured.** The point is round-tripping exactly what a future renderer needs (blockquotes, bold, etc. all survive as literal markdown syntax in the field value), not producing a "cleaner" derived version.
 - **Timestamps are the extracting device's own local time**, matching how assistant.koplugin writes them (`os.date("%Y-%m-%d %H:%M:%S")`, no UTC conversion). Fine as an ordering/identity aid; not an authoritative cross-timezone value.
+- **`extraction_state.lua`'s `State.flush()` must be called on every real extraction, not just the debug-menu path.** `State.saveForFile()` only updates the in-memory `LuaSettings` object; `flush()` persists it to disk. This was originally only called at the end of `Extractor.extractAll()` — see [vocabdeckextractor.koplugin](https://github.com/jdbway/vocabdeckextractor.koplugin)'s ARCHITECTURE.md for the real bug this caused there (VocabDeck's `last_write_wins` fields made it a correctness bug; here, since every field is `write_once`, the same gap is lower-stakes — a restart just forces a full file re-parse next time instead of using the cached fast path, since the real embedded per-entry timestamps get preserved either way — but it's fixed the same way regardless, for consistency and because a future field here might not stay `write_once` forever.
 
 ## Decisions and why
 
@@ -91,7 +93,6 @@ picked up until one runs).
 
 Tracked against [AnnotationSync.koplugin#93](https://github.com/dani84bs/AnnotationSync.koplugin/issues/93).
 
-- **Working and tested against real device data:** everything under "Data flow" above, including the filesystem walk finding real per-book notebooks sitting next to their books on a real library, with no `default_folder_for_logs` configured.
-- **Not implemented:** the `pushExtractorData` call and listening for AnnotationSync's sync event — same reason as the VocabDeck extractor: nothing to call yet.
+- **Working and tested end-to-end, including writeback, across two real, independently-editing KOReader instances** — the physical Kindle plus a Docker container running KOReader's official Linux desktop build, syncing against the same server. A note added on one device correctly appears, via real writeback, in the other device's actual notebook file on its next sync. Also includes everything under "Data flow" above: the filesystem walk finding real per-book notebooks sitting next to their books on a real library, with no `default_folder_for_logs` configured.
 - **New per-book notebooks aren't picked up automatically** between rescans — the walk result is cached, so a book added (or first annotated) after the last rescan won't show up until "Rescan for notebooks" runs again. Everything else about it (fixed-location files, already-known per-book files) stays fresh every extraction regardless.
 - **Sharing code with [vocabdeckextractor.koplugin](https://github.com/jdbway/vocabdeckextractor.koplugin) is deliberately partial right now.** `fs_walk.lua` is a good candidate for a shared suite-level utility later (it has zero notebook-specific knowledge), but the two repos can't actually share a file today without a real package to host it in — copy-pasting the same file into two still-standalone repos isn't reuse, just duplication with extra steps. The `main.lua` debug-menu boilerplate is duplicated between the two repos for the same reason. Both are expected to collapse into one shared core once the suite (see the roadmap in README.md) actually exists — not before, since we don't yet have a third extractor to confirm what's genuinely common versus specific to these first two.

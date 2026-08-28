@@ -238,6 +238,7 @@ function Extractor.extractFile(path, want_all)
     end
 
     State.saveForFile(path, { size = size, known_keys = known_keys })
+    State.flush()
     return want_all and all_records or new_records
 end
 

@@ -15,14 +15,13 @@ particular why this one is structurally simpler than the companion
 
 ## Status
 
-**Working today:** finding assistant.koplugin's notebook files, parsing
-entries out of their markdown format, and extracting only what's new since
-the last run. Verified against real device data — see
+**Working today:** the full round trip — finding assistant.koplugin's
+notebook files, parsing entries out of their markdown format, pushing to
+AnnotationSync, and appending merged entries from other devices back into
+the real notebook file. Verified end-to-end across two real,
+independently-editing KOReader instances — see
 [ARCHITECTURE.md](ARCHITECTURE.md#status--non-goals) for what's been tested
 and how.
-
-**Not implemented yet:** actually pushing to AnnotationSync — tracked on
-[AnnotationSync.koplugin#93](https://github.com/dani84bs/AnnotationSync.koplugin/issues/93).
 
 Finds both general notebooks and per-book notebooks (which default to
 sitting next to their book, wherever that is — no `default_folder_for_logs`
