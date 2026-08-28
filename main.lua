@@ -241,6 +241,7 @@ function AssistantExtractor:addToMainMenu(menu_items)
 end
 
 function AssistantExtractor:init()
+    logger.info("assistantextractor: version", require("_meta").version)
     if self.ui and self.ui.menu and self.ui.menu.registerToMainMenu then
         self.ui.menu:registerToMainMenu(self)
     end
