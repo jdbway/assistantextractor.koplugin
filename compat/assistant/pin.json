@@ -2,9 +2,5 @@
   "upstream_repo": "omer-faruq/assistant.koplugin",
   "upstream_branch": "main",
   "pinned_commit": "86a1b11b03140f989645cba19a0590f8cb744469",
-  "watched_files": [
-    "assistant_quicknote.lua",
-    "assistant_viewer.lua"
-  ],
   "last_checked": "2026-08-31"
 }

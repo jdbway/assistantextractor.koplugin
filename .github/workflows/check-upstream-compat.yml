@@ -1,101 +1,212 @@
 name: Check upstream assistant.koplugin compatibility
 
-# Two ways this can start:
-# - schedule: a cron expression, UTC time. "23 6 * * *" = 06:23 every day.
-#   (Off the hour on purpose -- GitHub throttles jobs that all fire exactly
-#   on :00, so a lot of scheduled Actions pile up there. Offset slightly
-#   from vocabdeckextractor's sibling workflow so they don't collide either.)
-# - workflow_dispatch: adds a manual "Run workflow" button on the Actions
-#   tab, with no inputs needed. Useful for testing without waiting for cron.
+# Two ways this can start: a daily schedule, or the "Run workflow" button
+# (workflow_dispatch) for testing without waiting for cron.
 on:
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:
 
-# GITHUB_TOKEN is an automatic, short-lived token GitHub mints for every
-# workflow run -- no secret to create yourself. By default it can only read
-# the repo; these two lines opt it up to also push a commit (contents) and
-# open/comment on issues (issues) in *this* repo only.
 permissions:
   contents: write
   issues: write
 
+# Split into three jobs on purpose:
+#   check-upstream   - cheap, no source build. Just: has upstream moved?
+#   behavioral-test  - only runs if it has. This is the expensive part
+#                      (builds KOReader from source), so skipping it
+#                      entirely on a no-op day matters.
+#   report           - always runs when upstream moved. Advances the pin on
+#                      a pass, files/updates an issue on a fail.
+#
+# Unlike vocabdeckextractor.koplugin's compat check (pure Lua data-layer
+# code, testable via KOReader's bundled luajit with no display at all),
+# assistant.koplugin's note-writing code (QuickNote:saveNote) needs a live
+# reader session -- self.assistant.ui.bookinfo, self.assistant.ui.document,
+# etc. -- to run for real. That means this check needs an actual KOReader
+# ReaderUI object, which means building KOReader itself. Pattern (container
+# image, build steps, kodev test runner) lifted directly from
+# dani84bs/AnnotationSync.koplugin's own .github/workflows/test.yml -- this
+# is KOReader's own supported plugin-testing path, not something improvised
+# here from scratch.
 jobs:
-  check-compat:
+  check-upstream:
     runs-on: ubuntu-latest
+    outputs:
+      moved: ${{ steps.compare.outputs.moved }}
+      upstream_repo: ${{ steps.pin.outputs.upstream_repo }}
+      upstream_branch: ${{ steps.pin.outputs.upstream_branch }}
+      upstream_head: ${{ steps.compare.outputs.upstream_head }}
+      pinned_commit: ${{ steps.pin.outputs.pinned_commit }}
     steps:
-      # Clones this repo (assistantextractor.koplugin) onto the runner.
-      # Every workflow that needs the repo's own files starts with this.
-      - name: Check out this repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Compare pinned files against upstream
+      - id: pin
+        run: |
+          set -eu
+          PIN_FILE="compat/assistant/pin.json"
+          echo "upstream_repo=$(jq -r '.upstream_repo' "$PIN_FILE")" >> "$GITHUB_OUTPUT"
+          echo "upstream_branch=$(jq -r '.upstream_branch' "$PIN_FILE")" >> "$GITHUB_OUTPUT"
+          echo "pinned_commit=$(jq -r '.pinned_commit' "$PIN_FILE")" >> "$GITHUB_OUTPUT"
+
+      # A cheap API call for the upstream branch's tip SHA, instead of a
+      # full clone -- this job's whole point is being fast enough to run
+      # unconditionally every day without cost.
+      - id: compare
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-
-          PIN_DIR="compat/assistant"
-          PIN_FILE="$PIN_DIR/pin.json"
-          UPSTREAM_REPO=$(jq -r '.upstream_repo' "$PIN_FILE")
-          UPSTREAM_BRANCH=$(jq -r '.upstream_branch' "$PIN_FILE")
-          PINNED_COMMIT=$(jq -r '.pinned_commit' "$PIN_FILE")
-
-          git clone --quiet --depth 50 --branch "$UPSTREAM_BRANCH" \
-            "https://github.com/$UPSTREAM_REPO.git" /tmp/upstream
-          UPSTREAM_HEAD=$(git -C /tmp/upstream rev-parse HEAD)
-
-          if [ "$UPSTREAM_HEAD" = "$PINNED_COMMIT" ]; then
-            echo "Upstream hasn't moved since the last pin ($PINNED_COMMIT). Nothing to do."
-            exit 0
+          UPSTREAM_HEAD=$(gh api "repos/${{ steps.pin.outputs.upstream_repo }}/commits/${{ steps.pin.outputs.upstream_branch }}" --jq '.sha')
+          echo "upstream_head=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
+          if [ "$UPSTREAM_HEAD" = "${{ steps.pin.outputs.pinned_commit }}" ]; then
+            echo "Upstream hasn't moved since the last pin. Nothing to do."
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream moved: ${{ steps.pin.outputs.pinned_commit }} -> $UPSTREAM_HEAD"
+            echo "moved=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Upstream moved: $PINNED_COMMIT -> $UPSTREAM_HEAD"
+  behavioral-test:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: koreader/kobase:0.5.3-22.04
+    env:
+      KODEBUG: "1"
+      MAKEFLAGS: OUTPUT_DIR=build PARALLEL_JOBS=4 INSTALL_DIR=install
+      EMULATE_READER: "1"
+    outputs:
+      test_output: ${{ steps.test.outputs.output }}
+    steps:
+      - name: Checkout KOReader Core
+        uses: actions/checkout@v4
+        with:
+          repository: koreader/koreader
+          path: koreader_core
+          ref: v2026.07.1
+          fetch-depth: 1
+          submodules: false
 
-          # Diff every watched file. If ANY of them changed since our last
-          # known-good snapshot, we don't trust the pin anymore.
-          #
-          # Note on style: every string built below uses printf with explicit
-          # \n's on ONE physical line, rather than a shell variable assignment
-          # that spans multiple literal lines. That's not a style preference --
-          # this whole script is itself the content of a YAML block scalar
-          # (the "run: |" above), and YAML requires every physical line to
-          # stay indented at least as far as the block started. A literal
-          # multi-line bash string breaks that the moment a continuation line
-          # (e.g. a markdown ``` fence starting at column 0) dips below that
-          # indentation -- YAML silently ends the block right there and
-          # parses whatever follows as top-level YAML.
-          DRIFTED=0
-          DIFF_OUTPUT=""
-          for f in $(jq -r '.watched_files[]' "$PIN_FILE"); do
-            if ! diff -u "$PIN_DIR/$f" "/tmp/upstream/$f" > /tmp/diff_out 2>&1; then
-              DRIFTED=1
-              DIFF_OUTPUT="$DIFF_OUTPUT$(printf '\n\n### %s\n```diff\n%s\n```' "$f" "$(cat /tmp/diff_out)")"
-            fi
-          done
+      - name: Checkout this repo as a plugin
+        uses: actions/checkout@v4
+        with:
+          path: koreader_core/plugins/assistantextractor.koplugin
 
-          if [ "$DRIFTED" = "0" ]; then
-            echo "No watched files changed -- safe to auto-advance the pin."
-            for f in $(jq -r '.watched_files[]' "$PIN_FILE"); do
-              cp "/tmp/upstream/$f" "$PIN_DIR/$f"
-            done
+      - name: Checkout upstream assistant.koplugin as a plugin (real HEAD, not the pin)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.check-upstream.outputs.upstream_repo }}
+          ref: ${{ needs.check-upstream.outputs.upstream_head }}
+          path: koreader_core/plugins/assistant.koplugin
+
+      - name: Install SDL3 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxext-dev libxcursor-dev libxinerama-dev libxi-dev \
+            libxrandr-dev libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libdbus-1-dev libudev-dev \
+            libasound2-dev libpulse-dev
+
+      - name: Generate cache key
+        run: |
+          cd koreader_core
+          make TARGET= cache-key
+
+      - name: Cache thirdparty
+        uses: actions/cache@v4
+        with:
+          path: koreader_core/base/thirdparty
+          key: ${{ runner.os }}-thirdparty-${{ hashFiles('koreader_core/cache-key') }}
+          restore-keys: |
+            ${{ runner.os }}-thirdparty-
+
+      - name: Cache build directory
+        uses: actions/cache@v4
+        with:
+          path: koreader_core/build
+          key: ${{ runner.os }}-build-${{ hashFiles('koreader_core/cache-key') }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('koreader_core/cache-key') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Fetch thirdparty
+        run: |
+          cd koreader_core
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/koreader_core"
+          make fetchthirdparty
+
+      - name: Build base
+        run: |
+          cd koreader_core
+          git submodule update --init --recursive base
+          if [ -d build ]; then
+            make base --assume-old=base
+          else
+            make base
+          fi
+
+      - name: Run behavioral compatibility check
+        id: test
+        run: |
+          set +e
+          mkdir -p koreader_core/spec/unit
+          cp koreader_core/plugins/assistantextractor.koplugin/spec/unit/compat_check_spec.lua koreader_core/spec/unit/compat_check_spec.lua
+          cd koreader_core
+          OUTPUT=$(./kodev test front compat_check 2>&1)
+          STATUS=$?
+          echo "$OUTPUT"
+          {
+            echo "output<<COMPAT_TEST_EOF"
+            echo "$OUTPUT"
+            echo "COMPAT_TEST_EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit $STATUS
+
+  report:
+    needs: [check-upstream, behavioral-test]
+    if: always() && needs.check-upstream.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Advance pin or file an issue
+        run: |
+          set -eu
+          PIN_FILE="compat/assistant/pin.json"
+          UPSTREAM_HEAD="${{ needs.check-upstream.outputs.upstream_head }}"
+
+          if [ "${{ needs.behavioral-test.result }}" = "success" ]; then
+            echo "Behavioral check passed -- safe to auto-advance the pin."
             jq --arg sha "$UPSTREAM_HEAD" --arg date "$(date -u +%Y-%m-%d)" \
               '.pinned_commit = $sha | .last_checked = $date' "$PIN_FILE" > /tmp/pin.json
             mv /tmp/pin.json "$PIN_FILE"
 
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add "$PIN_DIR"
-            git commit -m "Auto-advance assistant.koplugin pin to $UPSTREAM_HEAD (no watched-file changes)"
+            git add "$PIN_FILE"
+            git commit -m "Auto-advance assistant.koplugin pin to $UPSTREAM_HEAD (behavioral check passed)"
             git push
             exit 0
           fi
 
-          echo "Watched file(s) changed -- NOT advancing the pin. Filing an issue."
+          echo "Behavioral check failed -- NOT advancing the pin. Filing an issue."
 
           TITLE="Upstream drift: assistant.koplugin"
-          BODY=$(printf '%s moved from `%s` to `%s` on `%s`, and at least one file this extractor depends on changed in that range.\n\nThis pin was **not** auto-advanced -- someone needs to check whether `extractor_assistant.lua` / `notebook_parser.lua` still parse the new note format correctly, then update `%s/pin.json` and the snapshot file(s) by hand once confirmed.\n%s' \
-            "$UPSTREAM_REPO" "$PINNED_COMMIT" "$UPSTREAM_HEAD" "$UPSTREAM_BRANCH" "$PIN_DIR" "$DIFF_OUTPUT")
+          BODY=$(printf '%s moved from `%s` to `%s` on `%s`.\n\nThis pin was **not** auto-advanced -- the behavioral check failed.\n\nRan upstream'"'"'s real `assistant_quicknote.lua` (QuickNote:saveNote) against a real ReaderUI and this extractor'"'"'s `extractor_assistant.lua` / `notebook_parser.lua` directly (see `spec/unit/compat_check_spec.lua`):\n\n```\n%s\n```\n\nOnce fixed and confirmed, update `%s`.\n' \
+            "${{ needs.check-upstream.outputs.upstream_repo }}" "${{ needs.check-upstream.outputs.pinned_commit }}" "$UPSTREAM_HEAD" "${{ needs.check-upstream.outputs.upstream_branch }}" "${{ needs.behavioral-test.outputs.test_output }}" "$PIN_FILE")
 
           EXISTING=$(gh issue list --search "\"$TITLE\" in:title" --state open --json number --jq '.[0].number' || true)
           if [ -n "${EXISTING:-}" ]; then
@@ -105,6 +216,4 @@ jobs:
             gh issue create --title "$TITLE" --body "$BODY"
           fi
 
-          # Non-zero exit makes the Actions tab show this run as failed (red X),
-          # which is a second, more visible signal on top of the issue.
           exit 1
