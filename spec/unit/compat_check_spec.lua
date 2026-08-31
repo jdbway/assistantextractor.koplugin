@@ -36,13 +36,24 @@ describe("assistantextractor compatibility", function()
 
         -- Both plugin directories go on package.path so their sibling
         -- modules resolve via bare require() the same way they would when
-        -- KOReader's PluginLoader loads them for real. Deliberately NOT
-        -- requiring assistant.koplugin's own "main" module name from
-        -- assistantextractor's directory too -- both plugins ship a
-        -- main.lua, and Lua's require() cache is keyed by the module name
-        -- string, not the resolved path (the exact _meta.lua collision
-        -- documented in this repo's own README applies here too).
-        package.path = "plugins/assistantextractor.koplugin/?.lua;plugins/assistant.koplugin/?.lua;" .. package.path
+        -- KOReader's PluginLoader loads them for real.
+        --
+        -- Order here is NOT cosmetic. Both plugins ship a main.lua, and
+        -- Lua's require() resolves against package.path in order and
+        -- caches by the module name string, not the resolved path (the
+        -- same _meta.lua collision documented in this repo's own README).
+        -- assistant.koplugin's directory MUST come first: require("main")
+        -- below needs to resolve to the real Assistant plugin class, not
+        -- this extractor's own main.lua. Getting this backwards was a real
+        -- bug caught live: with the order reversed, require("main") silently
+        -- returned this extractor's own AssistantExtractor class instead,
+        -- so assistant_instance:init() ran the wrong init() entirely (one
+        -- that never sets self.config), and the failure surfaced several
+        -- calls later as "attempt to index field 'config' (a nil value)"
+        -- deep inside upstream's real saveToNotebookFile -- a confusing
+        -- symptom for what was actually a test-setup mistake, not a real
+        -- upstream incompatibility.
+        package.path = "plugins/assistant.koplugin/?.lua;plugins/assistantextractor.koplugin/?.lua;" .. package.path
 
         disable_plugins()
         require("document/canvascontext"):init(require("device"))
