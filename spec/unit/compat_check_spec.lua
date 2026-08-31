@@ -68,6 +68,19 @@ describe("assistantextractor compatibility", function()
         DataStorage.getDataDir = function() return test_data_dir end
         os.execute("mkdir -p " .. test_data_dir)
 
+        -- assistant.koplugin's Config.getAssistantDir() deliberately resolves
+        -- <DataStorage:getDataDir()>/plugins/assistant.koplugin (KOReader's
+        -- user-plugin convention), NOT wherever this process happened to
+        -- load the plugin's Lua code from. Overriding getDataDir() above for
+        -- test isolation means that directory is now empty, so _meta.lua
+        -- (and configuration.lua, if present) genuinely isn't where Config
+        -- expects it. Mirror the real plugin directory into the fake data
+        -- dir so that resolution succeeds the same way it would on a real
+        -- device -- caught live in CI as "cannot open .../_meta.lua: No such
+        -- file or directory" the first time this was missing.
+        os.execute("mkdir -p " .. test_data_dir .. "/plugins")
+        os.execute("cp -r plugins/assistant.koplugin " .. test_data_dir .. "/plugins/assistant.koplugin")
+
         sample_epub = test_data_dir .. "/compat_check.epub"
         require("ffi/util").copyFile("spec/front/unit/data/juliet.epub", sample_epub)
 
