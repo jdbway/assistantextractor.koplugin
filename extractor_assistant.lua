@@ -8,6 +8,7 @@ local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
 local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
+local util = require("util")
 
 local FSWalk = require("fs_walk")
 local NotebookParser = require("notebook_parser")
@@ -28,6 +29,8 @@ local FIELD_POLICY = {
     title = "write_once",
     body = "write_once",
     source_file = "write_once",
+    book_md5 = "write_once",
+    book_title = "write_once",
 }
 Extractor.FIELD_POLICY = FIELD_POLICY
 
@@ -72,6 +75,18 @@ end
 -- actually a notebook by content (starts with the "# [" entry header
 -- notebook_parser.lua also keys on), not by guessing at library layout.
 --
+-- That same default naming is also exactly what makes a per-book notebook's
+-- book identity recoverable after the fact, with no dependency on
+-- assistant.koplugin's own code or any change to its file format: strip the
+-- notebook's own extension and what's left over IS the book's real path
+-- (BookInfo:getNotebookFile()'s fallback is literally doc_path .. ".txt",
+-- which assistant.koplugin then renames to .md). See resolveBookPath()
+-- below. This was missed for a while: an earlier version of this comment
+-- already said as much, but nothing downstream ever acted on it, and a
+-- general claim that these notebooks "have no book association at all" got
+-- made and repeated before anyone actually traced getNotebookFile() to
+-- check.
+--
 -- Skips dot-directories, any *.sdr folder (KOReader's per-document settings
 -- sidecar -- never contains notebook content itself), and, only when
 -- falling back to the broad DataStorage root (home_dir unset), a few of
@@ -87,6 +102,65 @@ local function looksLikeNotebook(path)
     local head = file:read(64) or ""
     file:close()
     return head:match("^%s*# %[") ~= nil
+end
+
+-- If `notebook_path` is a per-book notebook, this is a real file on disk --
+-- the book itself, at exactly the path assistant.koplugin derived the
+-- notebook's own name from. A general/legacy notebook's stripped path
+-- (e.g. "general_notebook" or "general_notebooks/vacation-reading") won't
+-- exist as a file, so this naturally and correctly returns nil for those
+-- without needing to special-case their names.
+--
+-- Known gap: if assistant.koplugin's "default_folder_for_logs" feature is
+-- configured, the notebook gets relocated to that folder while keeping the
+-- book's filename (see saveToNotebookFile()'s default_folder branch) --
+-- e.g. book at "/books/x.epub" ends up with a notebook at
+-- "/notes/x.epub.md". Stripping ".md" there gives "/notes/x.epub", which
+-- isn't the real book path, so this correctly-but-unhelpfully returns nil
+-- (no false match, just no match) rather than a wrong one. Recovering book
+-- identity in that configuration would need reading the config file for
+-- that folder and searching for the book by filename elsewhere -- not
+-- attempted here; this covers the default, unconfigured case, which is
+-- what a plain install actually does.
+local function resolveBookPath(notebook_path)
+    local book_path = notebook_path:gsub("%.md$", "")
+    if book_path ~= notebook_path and lfs.attributes(book_path, "mode") == "file" then
+        return book_path
+    end
+    return nil
+end
+
+-- Reads the book's own title straight out of its .sdr sidecar, the same
+-- approach stone-arch-studio's libraryextractor.koplugin uses (see its
+-- getSidecarData()) -- no need to open the document, no dependency on
+-- VocabDeck/assistant.koplugin's own code being loaded, matching this
+-- extractor's existing "read files directly" design. Returns nil (not "")
+-- if there's no sidecar yet, or the title genuinely isn't recorded there --
+-- callers already treat nil/"" the same way via the "or ''" convention
+-- used everywhere else in this file.
+local function getBookTitle(book_path)
+    local sdr_dir = book_path:gsub("%.[^./\\]+$", ".sdr")
+    if lfs.attributes(sdr_dir, "mode") ~= "directory" then
+        sdr_dir = book_path .. ".sdr"
+    end
+    if lfs.attributes(sdr_dir, "mode") ~= "directory" then return nil end
+
+    for name in lfs.dir(sdr_dir) do
+        if name:match("^metadata%..*%.lua$") then
+            local f = loadfile(ffiUtil.joinPath(sdr_dir, name))
+            if f then
+                setfenv(f, {})
+                local ok, data = pcall(f)
+                if ok and type(data) == "table" then
+                    local doc_props = data.doc_props or {}
+                    local stats = data.stats or {}
+                    local title = doc_props.title or stats.title
+                    if title and title ~= "" then return title end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 local function makeSkipDirFn(is_root_fallback_dir)
@@ -216,6 +290,15 @@ function Extractor.extractFile(path, want_all)
     local filename = path:match("([^/\\]+)$") or path
     local entries = NotebookParser.parse(content, filename)
 
+    -- Computed once per file, not once per entry -- a notebook with many
+    -- entries would otherwise reopen and reread the book file (and its
+    -- sidecar) redundantly for every single entry it contains. nil (not
+    -- "") for a general/legacy notebook, since resolveBookPath() correctly
+    -- returns nil for those.
+    local book_path = resolveBookPath(path)
+    local book_md5 = book_path and util.partialMD5(book_path)
+    local book_title = book_path and getBookTitle(book_path)
+
     local known_keys = state.known_keys or {}
     local new_records, all_records = {}, {}
     for _, entry in ipairs(entries) do
@@ -224,8 +307,11 @@ function Extractor.extractFile(path, want_all)
         if is_new then
             fields = {}
             for name, policy in pairs(FIELD_POLICY) do
+                local value = entry[name]
+                if name == "book_md5" then value = book_md5 or ""
+                elseif name == "book_title" then value = book_title or "" end
                 fields[name] = {
-                    value = entry[name],
+                    value = value,
                     policy = policy,
                     changed_at = entry.timestamp or os.time(),
                 }

@@ -141,5 +141,23 @@ describe("assistantextractor compatibility", function()
         assert.is_true(#fields.title.value > 0)
         assert.is_not_nil(fields.timestamp)
         assert.is_not_nil(fields.timestamp.value)
+
+        -- book_md5: this ran against a real per-book notebook (a document
+        -- was open the whole time), so extractor_assistant.lua should have
+        -- resolved the notebook's own filename back to the real book file
+        -- and hashed it -- the same partial-content hash AnnotationSync
+        -- itself uses for cross-device book identity (see
+        -- vocabdeckextractor.koplugin's identical field for the fuller
+        -- rationale). Asserted against a hash computed independently here,
+        -- not just "is it non-empty", to prove the actual book file got
+        -- hashed, not some other path that happens to produce a hash.
+        local util = require("util")
+        local expected_book_md5 = assert(util.partialMD5(sample_epub),
+            "util.partialMD5 couldn't hash the test document -- can't verify book_md5 against it")
+        assert.is_not_nil(fields.book_md5)
+        assert.are.equal(expected_book_md5, fields.book_md5.value)
+
+        assert.is_not_nil(fields.book_title)
+        assert.is_true(#fields.book_title.value >= 0) -- may legitimately be "" if the sidecar has no title yet
     end)
 end)

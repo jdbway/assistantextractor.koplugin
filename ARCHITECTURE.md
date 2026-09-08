@@ -67,6 +67,36 @@ walk is the expensive part, so its result is cached in
 for notebooks" debug action, or a newly-added book's notebook won't be
 picked up until one runs).
 
+## Book identity (`book_md5` / `book_title`)
+
+The same per-book naming convention used to *find* notebooks (above) also
+makes a per-book notebook's book identity recoverable after the fact, with
+no dependency on assistant.koplugin's own code being loaded and no change
+to its file format: `resolveBookPath()` strips a notebook path's `.md`
+extension and checks whether a real file exists there. For a per-book
+notebook, it does — that's the book itself. For a general/legacy notebook
+(`general_notebook.md`, anything in `general_notebooks/`), it doesn't, so
+this correctly resolves to "no book" rather than a false match.
+
+When a book is found this way, `book_md5` is `util.partialMD5()` of that
+book file — the same partial-content hash AnnotationSync itself uses
+internally to identify a book across devices (see
+[vocabdeckextractor.koplugin](https://github.com/jdbway/vocabdeckextractor.koplugin)'s
+identical field for the fuller rationale on why a hash and not a raw path).
+`book_title` is read directly from the book's own `.sdr` sidecar
+(`doc_props.title`/`stats.title`), the same technique
+[stone-arch-studio/libraryextractor.koplugin](https://github.com/stone-arch-studio/libraryextractor.koplugin)
+uses. Both are computed once per notebook *file*, not once per entry.
+
+**Known gap:** if assistant.koplugin's `default_folder_for_logs` feature is
+configured, the notebook is relocated to that folder while keeping the
+book's filename — stripping `.md` from the relocated path doesn't resolve
+back to the real book location, so `resolveBookPath()` correctly returns
+nil (no match) rather than a wrong one. This covers the default,
+unconfigured case; recovering identity under a configured redirect folder
+would need reading that config and searching for the book by filename
+elsewhere, not attempted here.
+
 ## Data flow
 
 1. `main.lua`'s debug menu (eventually: AnnotationSync's broadcast sync event) calls `Extractor.extractAll()`.
